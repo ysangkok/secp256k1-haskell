@@ -324,6 +324,14 @@ foreign import ccall
     -> IO Ret
 
 foreign import ccall
+    "secp256k1.h secp256k1_schnorrsig_serialize"
+    signatureSerializeSchnorr
+    :: Ptr Ctx
+    -> Ptr CUChar -- ^ array for encoded signature, must be large enough
+    -> Ptr Sig64
+    -> IO Ret
+
+foreign import ccall
     "secp256k1.h secp256k1_ecdsa_signature_serialize_der"
     ecdsaSignatureSerializeDer
     :: Ptr Ctx
@@ -386,6 +394,23 @@ foreign import ccall
 foreign import ccall
     "secp256k1.h secp256k1_ec_privkey_tweak_add"
     ecSecKeyTweakAdd
+    :: Ptr Ctx
+    -> Ptr SecKey32
+    -> Ptr Tweak32
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_xonly_pubkey_tweak_add"
+    schnorrPubKeyTweakAdd
+    :: Ptr Ctx
+    -> Ptr PubKey64
+    -> Ptr CInt
+    -> Ptr Tweak32
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_xonly_seckey_tweak_add"
+    schnorrSecKeyTweakAdd
     :: Ptr Ctx
     -> Ptr SecKey32
     -> Ptr Tweak32
@@ -476,6 +501,70 @@ foreign import ccall
     -> Ptr RecSig65
     -> Ptr Msg32
     -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_schnorrsig_sign"
+    schnorrSign
+    :: Ptr Ctx
+    -> Ptr Sig64
+    -> Ptr Msg32
+    -> Ptr SecKey32
+    -> FunPtr (NonceFunction a)
+    -> Ptr a -- ^ nonce data
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_xonly_pubkey_tweak_test"
+    xOnlyPubKeyTweakTest
+    :: Ptr Ctx
+    -> Ptr PubKey64 -- output_pubkey
+    -> CInt -- is_negated
+    -> Ptr PubKey64 -- internal_pubkey
+    -> Ptr Tweak32
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_xonly_pubkey_serialize"
+    schnorrPubKeySerialize
+    :: Ptr Ctx
+    -> Ptr CUChar -- 32 bytes output buffer
+    -> Ptr PubKey64
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_schnorrsig_verify"
+    schnorrVerify
+    :: Ptr Ctx
+    -> Ptr Sig64
+    -> Ptr Msg32
+    -> Ptr PubKey64
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_schnorrsig_parse"
+    schnorrSigImport
+    :: Ptr Ctx
+    -> Ptr Sig64 -- out
+    -> Ptr CUChar -- in
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_xonly_pubkey_parse"
+    schnorrXOnlyPubKeyImport
+    :: Ptr Ctx
+    -> Ptr PubKey64 -- out
+    -> Ptr CUChar -- in
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_xonly_pubkey_create"
+    schnorrXOnlyPubKeyCreate
+    :: Ptr Ctx
+    -> Ptr PubKey64
+    -> Ptr SecKey32
+    -> IO Ret
+
+-- importXOnlyPubKey, importSchnorrSig, verifyMsgSchnorr
 
 #ifdef ECDH
 foreign import ccall
