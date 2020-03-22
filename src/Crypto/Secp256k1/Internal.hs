@@ -81,6 +81,30 @@ newtype SerFlags = SerFlags { getSerFlags :: CUInt }
 newtype Ret = Ret { getRet :: CInt }
     deriving (Read, Show, Eq, Ord, Generic, NFData)
 
+newtype MusigPreSession = MusigPreSession { getMusigPreSession :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
+newtype MusigSession = MusigSession { getMusigSession :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
+newtype MusigSignerData = MusigSignerData { getMusigSignerData :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
+newtype ScratchSpace = ScratchSpace { getScratchSpace :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
+newtype PartialSignature = PartialSignature { getPartialSignature :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
+newtype NonceCommitment32 = NonceCommitment32 { getNonceCommitment32 :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
+newtype SessionId32 = SessionId32 { getSessionId32 :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
+newtype PublicNonce32 = PublicNonce32 { getPublicNonce32 :: ShortByteString }
+    deriving (Read, Show, Eq, Ord)
+
 -- | Nonce32-generating function
 type NonceFunction a
     =  Ptr Nonce32
@@ -234,6 +258,62 @@ instance Storable Algo16 where
     peek p = Algo16 . toShort <$> packByteString (castPtr p, 16)
     poke p (Algo16 k) = useByteString (fromShort k) $
         \(b, _) -> copyArray (castPtr p) b 16
+
+instance Storable MusigPreSession where
+    sizeOf _ = 88
+    alignment _ = 1
+    peek p = MusigPreSession . toShort <$> packByteString (castPtr p, 88)
+    poke p (MusigPreSession k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 88
+
+instance Storable MusigSession where
+    sizeOf _ = 448
+    alignment _ = 1
+    peek p = MusigSession . toShort <$> packByteString (castPtr p, 448)
+    poke p (MusigSession k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 448
+
+instance Storable MusigSignerData where
+    sizeOf _ = 104
+    alignment _ = 1
+    peek p = MusigSignerData . toShort <$> packByteString (castPtr p, 104)
+    poke p (MusigSignerData k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 104
+
+instance Storable ScratchSpace where
+    sizeOf _ = 32
+    alignment _ = 1
+    peek p = ScratchSpace . toShort <$> packByteString (castPtr p, 32)
+    poke p (ScratchSpace k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 32
+
+instance Storable PartialSignature where
+    sizeOf _ = 32
+    alignment _ = 1
+    peek p = PartialSignature . toShort <$> packByteString (castPtr p, 32)
+    poke p (PartialSignature k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 32
+
+instance Storable NonceCommitment32 where
+    sizeOf _ = 32
+    alignment _ = 1
+    peek p = NonceCommitment32 . toShort <$> packByteString (castPtr p, 32)
+    poke p (NonceCommitment32 k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 32
+
+instance Storable SessionId32 where
+    sizeOf _ = 32
+    alignment _ = 1
+    peek p = SessionId32 . toShort <$> packByteString (castPtr p, 32)
+    poke p (SessionId32 k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 32
+
+instance Storable PublicNonce32 where
+    sizeOf _ = 32
+    alignment _ = 1
+    peek p = PublicNonce32 . toShort <$> packByteString (castPtr p, 32)
+    poke p (PublicNonce32 k) = useByteString (fromShort k) $
+        \(b, _) -> copyArray (castPtr p) b 32
 
 isSuccess :: Ret -> Bool
 isSuccess (Ret 0) = False
@@ -562,6 +642,140 @@ foreign import ccall
     :: Ptr Ctx
     -> Ptr PubKey64
     -> Ptr SecKey32
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_session_init"
+    musigSessionInit
+    :: Ptr Ctx
+    -> Ptr MusigSession -- output
+    -> Ptr MusigSignerData -- output
+    -> Ptr NonceCommitment32 -- input, nonce commitment
+    -> Ptr SessionId32 -- input, session id
+    -> Ptr Msg32 -- input, const, optional
+    -> Ptr PubKey64 -- input, combined pk, const
+    -> Ptr MusigPreSession -- input, const
+    -> CSize -- input, number of signers
+    -> CSize -- input, our signer index in the multi-signature process
+    -> Ptr SecKey32 -- input, const
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_scratch_space_create"
+    scratchSpaceCreate
+    :: Ptr Ctx
+    -> CSize
+    -> IO (Ptr ScratchSpace)
+
+foreign import ccall
+    "secp256k1.h secp256k1_scratch_space_destroy"
+    scratchSpaceDestroy
+    :: Ptr Ctx
+    -> Ptr ScratchSpace
+    -> IO ()
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_pubkey_combine"
+    musigPubKeyCombine
+    :: Ptr Ctx
+    -> Ptr ScratchSpace -- optional
+    -> Ptr PubKey64 -- output
+    -> Ptr MusigPreSession -- output
+    -> Ptr PubKey64 -- input, array of pubkeys
+    -> CSize -- input, number of pubkeys
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_session_get_public_nonce"
+    musigGetPublicNonce
+    :: Ptr Ctx
+    -> Ptr MusigSession -- input, output
+    -> Ptr MusigSignerData -- input, output
+    -> Ptr PublicNonce32 -- output
+    -> Ptr (Ptr NonceCommitment32) -- input, commitments (each 32 bytes)
+    -> CSize -- input, number of commitments
+    -> Ptr Msg32 -- input, optional if set in init
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_set_nonce"
+    musigSetNonce
+    :: Ptr Ctx
+    -> Ptr MusigSignerData
+    -> Ptr PublicNonce32
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_session_combine_nonces"
+    musigCombineNonces
+    :: Ptr Ctx
+    -> Ptr MusigSession -- input, output
+    -> Ptr MusigSignerData -- input, output
+    -> CSize -- number of signers
+    -> Ptr CInt -- output, optional, combined nonce negated
+    -> Ptr PubKey64 -- input, optional, adaptor
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_partial_signature_parse"
+    musigPartialSignatureParse
+    :: Ptr Ctx
+    -> Ptr PartialSignature -- output
+    -> Ptr CUChar -- input, 32 bytes
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_partial_signature_serialize"
+    musigPartialSignatureSerialize
+    :: Ptr Ctx
+    -> Ptr CUChar -- output, 32 bytes
+    -> Ptr PartialSignature -- input
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_partial_sig_combine"
+    musigPartialSignatureCombine
+    :: Ptr Ctx
+    -> Ptr MusigSession -- input
+    -> Ptr Sig64 -- output
+    -> Ptr PartialSignature -- input, array
+    -> CSize -- input, number of signatures in array
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_partial_sign"
+    musigPartialSign
+    :: Ptr Ctx
+    -> Ptr MusigSession -- input, output
+    -> Ptr PartialSignature -- input, output
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_partial_sig_adapt"
+    musigSignatureAdapt
+    :: Ptr Ctx
+    -> Ptr PartialSignature -- input, output
+    -> Ptr PartialSignature -- input
+    -> Ptr SecKey32 -- input
+    -> CInt -- input, is_combined_pk_negated
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_musig_extract_secret_adaptor"
+    musigExtractSecretAdaptor
+    :: Ptr Ctx
+    -> Ptr SecKey32 -- output
+    -> Ptr Sig64 -- input
+    -> Ptr PartialSignature -- input, array!
+    -> CSize -- input, amount of signatures
+    -> CInt -- input, is_combined_pk_negated
+    -> IO Ret
+
+foreign import ccall
+    "secp256k1.h secp256k1_ec_privkey_negate"
+    ecTweakNegate
+    :: Ptr Ctx
+    -> Ptr Tweak32
     -> IO Ret
 
 -- importXOnlyPubKey, importSchnorrSig, verifyMsgSchnorr

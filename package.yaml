@@ -23,6 +23,9 @@ dependencies:
   - hashable
   - QuickCheck
   - string-conversions
+  - transformers
+  - typelits-witnesses
+  - fixed-vector
 library:
   source-dirs: src
   pkg-config-dependencies:
@@ -30,6 +33,7 @@ library:
   when:
   - condition: flag(ecdh)
     cpp-options: -DECDH
+  ghc-options: -Wall
 tests:
   spec:
     main: Spec.hs
@@ -42,6 +46,7 @@ tests:
       - secp256k1-haskell
       - mtl
       - HUnit
+    ghc-options: -Wall
 flags:
   ecdh:
     description: "Enable (experimental) ECDH APIs"

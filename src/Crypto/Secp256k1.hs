@@ -1,6 +1,8 @@
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE GADTs #-}
 {-|
 Module      : Crypto.Secp256k1
 License     : MIT
@@ -46,6 +48,8 @@ module Crypto.Secp256k1
     , schnorrTweakAddPubKey
     , schnorrTweakAddSecKey
     , testTweakXOnlyPubKey
+    , SchnorrSig
+    , XOnlyPubKey
     -- ** Compact
     , CompactSig(..)
     , exportCompactSig
@@ -68,19 +72,46 @@ module Crypto.Secp256k1
     , tweakAddPubKey
     , tweakMulPubKey
     , combinePubKeys
+    , tweakNegate
 
 #ifdef ECDH
     -- * Diffie Hellman
     , ecdh
 #endif
+    , wMusigPubKeyCombine
+    , wMusigSetNonce
+    , wMusigCombineNonces
+    , wMusigGetPublicNonce
+    , wMusigPartialSignatureSerialize
+    , wMusigPartialSignatureParse
+    , wMusigSessionInit
+    , wMusigPartialSign
+    , wMusigPartialSignatureCombine
+    , wMusigPartialSignatureAdapt
+    , wMusigExtractSecKey
+    , nonceCommitment
+    , NonceCommitment
+    , getNonceCommitment
+    , SessionId
+    , sessionId
+    , getSessionId
+    , WPartialSignature
+    , WMusigPreSession
+    , WMusigSession
+    , WMusigRound2
+    , WSignerData
+    , PublicNonce
     ) where
 
-import           Control.Monad             (replicateM, unless, (<=<))
+import           Control.Monad             (replicateM, unless, (<=<), guard)
+import           Control.Monad.IO.Class    (liftIO)
+import           Control.Monad.Trans.Maybe (runMaybeT)
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import qualified Data.ByteString.Base16    as B16
 import           Data.ByteString.Short     (fromShort, toShort)
 import           Data.Hashable             (Hashable (..))
+import           Data.Vector.Fixed         (Vector, Dim, toList, length)
 import           Data.Maybe                (fromJust, fromMaybe, isJust)
 import           Data.Serialize            (decode, encode)
 import           Data.String               (IsString (..))
@@ -88,8 +119,11 @@ import           Data.String.Conversions   (ConvertibleStrings, cs)
 import           Foreign                   (ForeignPtr, alloca, allocaArray,
                                             allocaBytes, mallocForeignPtr,
                                             nullFunPtr, nullPtr, peek, poke,
-                                            pokeArray, withForeignPtr)
-import           Foreign.C                 (CInt)
+                                            pokeArray, withForeignPtr,
+                                            advancePtr, Ptr, withArray,
+                                            mallocForeignPtrArray,
+                                            withArrayLen)
+import           Foreign.C                 (CInt, CSize)
 import           System.IO.Unsafe          (unsafePerformIO)
 import           Test.QuickCheck           (Arbitrary (..),
                                             arbitraryBoundedRandom, suchThat)
@@ -98,6 +132,14 @@ import           Text.Read                 (Lexeme (String), lexP, parens,
 
 import           Control.DeepSeq
 import           Crypto.Secp256k1.Internal
+import           GHC.TypeLits              (KnownNat)
+import           GHC.TypeLits.Witnesses    (SNat, fromSNat)
+import           GHC.Natural               (naturalToInt, naturalToInteger)
+import           Prelude hiding            (length)
+import qualified Prelude
+
+singToSize :: SNat n -> CSize
+singToSize = fromInteger . naturalToInteger . fromSNat
 
 newtype PubKey = PubKey (ForeignPtr PubKey64)
 newtype XOnlyPubKey = XOnlyPubKey (ForeignPtr PubKey64)
@@ -107,6 +149,18 @@ newtype SchnorrSig = SchnorrSig (ForeignPtr Sig64)
 newtype SecKey = SecKey (ForeignPtr SecKey32)
 newtype Tweak = Tweak (ForeignPtr Tweak32)
 newtype RecSig = RecSig (ForeignPtr RecSig65)
+data WMusigPreSession n where
+    WMusigPreSession :: KnownNat n => ForeignPtr MusigPreSession -> WMusigPreSession n
+data WMusigSession n where
+    WMusigSession :: KnownNat n => ForeignPtr MusigSession -> WMusigSession n
+data WMusigRound2 n where
+    WMusigRound2 :: KnownNat n => ForeignPtr MusigSession -> WMusigRound2 n
+newtype WPartialSignature = WPartialSignature (ForeignPtr PartialSignature)
+data WSignerData n where
+    WSignerData :: KnownNat n => ForeignPtr MusigSignerData -> WSignerData n
+newtype NonceCommitment = NonceCommitment (ForeignPtr NonceCommitment32)
+newtype SessionId = SessionId (ForeignPtr SessionId32)
+newtype PublicNonce = PublicNonce (ForeignPtr PublicNonce32)
 
 instance NFData PubKey where
     rnf (PubKey p) = p `seq` ()
@@ -245,6 +299,9 @@ instance Show Tweak where
 instance Eq PubKey where
     fp1 == fp2 = getPubKey fp1 == getPubKey fp2
 
+instance Eq XOnlyPubKey where
+    fp1 == fp2 = getXOnlyPubKey fp1 == getXOnlyPubKey fp2
+
 instance Eq Msg where
     fm1 == fm2 = getMsg fm1 == getMsg fm2
 
@@ -307,6 +364,11 @@ getSecKey (SecKey fk) =
     fromShort $ getSecKey32 $ unsafePerformIO $ withForeignPtr fk peek
 
 -- Get 64-byte public key.
+getXOnlyPubKey :: XOnlyPubKey -> ByteString
+getXOnlyPubKey (XOnlyPubKey fp) =
+    fromShort $ getPubKey64 $ unsafePerformIO $ withForeignPtr fp peek
+
+-- Get 64-byte public key.
 getPubKey :: PubKey -> ByteString
 getPubKey (PubKey fp) =
     fromShort $ getPubKey64 $ unsafePerformIO $ withForeignPtr fp peek
@@ -320,6 +382,16 @@ getMsg (Msg fm) =
 getTweak :: Tweak -> ByteString
 getTweak (Tweak ft) =
     fromShort $ getTweak32 $ unsafePerformIO $ withForeignPtr ft peek
+
+-- | Get 32-byte nonce commitment.
+getNonceCommitment :: NonceCommitment -> ByteString
+getNonceCommitment (NonceCommitment ft) =
+    fromShort $ getNonceCommitment32 $ unsafePerformIO $ withForeignPtr ft peek
+
+-- | Get 32-byte session id.
+getSessionId :: SessionId -> ByteString
+getSessionId (SessionId ft) =
+    fromShort $ getSessionId32 $ unsafePerformIO $ withForeignPtr ft peek
 
 -- | Import DER-encoded public key.
 importPubKey :: ByteString -> Maybe PubKey
@@ -530,15 +602,16 @@ testTweakXOnlyPubKey (XOnlyPubKey fp) is_negated (XOnlyPubKey internal) (Tweak f
 -- | Add multiple public keys together.
 combinePubKeys :: [PubKey] -> Maybe PubKey
 combinePubKeys pubs = withContext $ \ctx -> pointers [] pubs $ \ps ->
-    allocaArray (length ps) $ \a -> do
+    allocaArray (Prelude.length ps) $ \a -> do
         pokeArray a ps
         fp <- mallocForeignPtr
         ret <- withForeignPtr fp $ \p ->
-            ecPubKeyCombine ctx p a (fromIntegral $ length ps)
+            ecPubKeyCombine ctx p a (fromIntegral $ Prelude.length ps)
         if isSuccess ret
             then return $ Just $ PubKey fp
             else return Nothing
   where
+    pointers :: [Ptr PubKey64] -> [PubKey] -> ([Ptr PubKey64] -> IO (Maybe PubKey)) -> IO (Maybe PubKey)
     pointers ps [] f = f ps
     pointers ps (PubKey fp : pubs') f =
         withForeignPtr fp $ \p -> pointers (p:ps) pubs' f
@@ -596,6 +669,253 @@ recover (RecSig frg) (Msg fm) = withContext $ \ctx ->
         fp <- mallocForeignPtr
         ret <- withForeignPtr fp $ \pp -> ecdsaRecover ctx pp prg pm
         if isSuccess ret then return $ Just $ PubKey fp else return Nothing
+
+wMusigSessionInit
+    :: KnownNat n => NonceCommitment -> SessionId -> Msg -> XOnlyPubKey
+    -> WMusigPreSession n -> CSize -> SecKey -> SNat n
+    -> IO (Maybe (WMusigSession n, WSignerData n))
+wMusigSessionInit (NonceCommitment fwNonceCommitment)
+                  (SessionId fwSessionId) (Msg fwMsg32)
+                  (XOnlyPubKey fwCombinedPk)
+                  (WMusigPreSession fwMusigPreSession)
+                  ourSignerIndex (SecKey fwSecKey) numberOfSigners = runMaybeT $ do
+  let nSigners :: CSize = singToSize numberOfSigners
+  guard $ ourSignerIndex < nSigners
+  --guard $ nSigners /= 0 -- not necessary since previous guard guarantees that nSigners is larger than the minimum ourSignerIndex (CSize), which is 0
+  fwMusigSession <- liftIO mallocForeignPtr
+  let intNSigners :: Int = naturalToInt $ fromSNat numberOfSigners
+  fwSignerData <- liftIO $ mallocForeignPtrArray intNSigners
+  ret <-
+    liftIO $
+      withForeignPtr fctx $ \ctx ->
+        withForeignPtr fwMsg32 $ \wMsg32 ->
+          withForeignPtr fwCombinedPk $ \wCombinedPk ->
+            withForeignPtr fwSecKey $ \wSecKey ->
+              withForeignPtr fwMusigPreSession $ \wMusigPreSession ->
+                withForeignPtr fwMusigSession $ \wMusigSession ->
+                  withForeignPtr fwNonceCommitment $ \wNonceCommitment ->
+                    withForeignPtr fwSignerData $ \wSignerData ->
+                      withForeignPtr fwSessionId $ \wSessionId ->
+                        musigSessionInit
+                          ctx
+                          wMusigSession    -- output
+                          wSignerData      -- output
+                          wNonceCommitment -- input, nonce commitment
+                          wSessionId -- input, session id
+                          wMsg32 -- input, const, optional
+                          wCombinedPk -- input, combined pk, const
+                          wMusigPreSession -- input, const
+                          nSigners -- input, number of signers
+                          ourSignerIndex -- input, our signer index in the multi-signature process
+                          wSecKey -- input, const
+  guard $ isSuccess ret
+  return $ (WMusigSession fwMusigSession, WSignerData fwSignerData)
+
+wMusigPubKeyCombine :: (KnownNat n, Vector v XOnlyPubKey, Dim v ~ n) => v XOnlyPubKey -> Maybe (XOnlyPubKey, WMusigPreSession n)
+wMusigPubKeyCombine pubKeys = withContext $ \ctx -> runMaybeT $ do
+    guard (length pubKeys /= 0)
+    let fkList = fmap (\(XOnlyPubKey pk64) -> pk64) (toList pubKeys)
+    let copyActions = traverse withForeignPtr fkList peek
+    pubKeyList :: [PubKey64] <- liftIO $ sequenceA copyActions
+    fcombinedPk <- liftIO mallocForeignPtr
+    fpreSession <- liftIO mallocForeignPtr
+    ptrScratch <- liftIO $ scratchSpaceCreate ctx (1024 * 1024)
+    ret <- liftIO $
+        withArray pubKeyList $ \(arrPtr :: Ptr PubKey64) ->
+            withForeignPtr fcombinedPk $ \combinedPk ->
+                withForeignPtr fpreSession $ \preSession ->
+                    musigPubKeyCombine ctx ptrScratch combinedPk preSession arrPtr (intToSize $ length pubKeys)
+    liftIO $ scratchSpaceDestroy ctx ptrScratch
+    guard $ isSuccess ret
+    return (XOnlyPubKey fcombinedPk, WMusigPreSession fpreSession)
+
+wMusigPartialSignatureParse :: ByteString -> Maybe WPartialSignature
+wMusigPartialSignatureParse bs = withContext $ \ctx ->
+    if BS.length bs /= 32
+        then return Nothing
+        else do
+            fp <- mallocForeignPtr
+            ret <-
+                useByteString bs $ \(b, l) ->
+                    withForeignPtr fp $ \p ->
+                        musigPartialSignatureParse ctx p b
+            return $
+                if isSuccess ret
+                    then Just $ WPartialSignature fp
+                    else Nothing
+
+wMusigPartialSignatureSerialize :: WPartialSignature -> ByteString
+wMusigPartialSignatureSerialize (WPartialSignature fk) = withContext $ \ctx ->
+    allocaBytes 32 $ \o -> do
+        ret <-
+            withForeignPtr fk $ \p ->
+                musigPartialSignatureSerialize ctx o p
+        unless (isSuccess ret) $ error "could not serialize partial signature"
+        packByteString (o, 32)
+
+intToSize :: Int -> CSize
+intToSize = fromInteger . toInteger
+
+withPartialSigs :: [WPartialSignature] -> (CSize -> Ptr PartialSignature -> IO a) -> IO a
+withPartialSigs partialSigsList bracket =
+  let
+    fkList = fmap (\(WPartialSignature pk64) -> pk64) partialSigsList
+    copyActions = traverse withForeignPtr fkList peek
+  in do
+    partialSigs <- sequenceA copyActions
+    withArrayLen partialSigs $ \x -> bracket $ intToSize x
+
+wMusigPartialSignatureCombine :: (Vector v WPartialSignature, Dim v ~ n) => v WPartialSignature -> WMusigRound2 n -> Maybe SchnorrSig
+wMusigPartialSignatureCombine sigList (WMusigRound2 fwMusigSession) = withContext $ \ctx -> do
+    sigFPtr <- mallocForeignPtr
+    ret <-
+        withPartialSigs (toList sigList) $ \len -> \(arrPtr :: Ptr PartialSignature) ->
+            withForeignPtr fwMusigSession $ \ptrMusigSession ->
+                withForeignPtr sigFPtr $ \sigPtr ->
+                    musigPartialSignatureCombine ctx ptrMusigSession sigPtr arrPtr len
+    return $
+        if isSuccess ret
+            then Just (SchnorrSig sigFPtr)
+            else Nothing
+
+-- these three are in IO because they modify the session and/or signer data
+wMusigGetPublicNonce :: (Vector v NonceCommitment, Dim v ~ n) => WMusigSession n -> WSignerData n -> v NonceCommitment -> IO (Maybe PublicNonce)
+wMusigGetPublicNonce (WMusigSession fkSession) (WSignerData fkData) commitments =
+  withForeignPtr fctx $ \ctx ->
+    let
+      fkList :: [ForeignPtr NonceCommitment32]
+      fkList = map (\(NonceCommitment pk64) -> pk64) (toList commitments)
+      copyActions :: [IO NonceCommitment32]
+      copyActions = traverse withForeignPtr fkList peek
+      len :: Integer
+      len = toInteger $ length commitments
+      indexes = [0..((fromInteger len) - 1)]
+    in do
+      nonceCopyList :: [NonceCommitment32] <- sequenceA copyActions
+      fkNonce <- mallocForeignPtr
+      ret <-
+        withForeignPtr fkNonce $ \ptrNonce ->
+          withArray nonceCopyList $ \arrPtr ->
+            let
+              ptrs :: [Ptr NonceCommitment32]
+              ptrs = map (advancePtr arrPtr) indexes
+            in
+              withArray ptrs $ \(ptrPtr :: Ptr (Ptr NonceCommitment32)) ->
+                withForeignPtr fkData $ \ptrData ->
+                  withForeignPtr fkSession $ \ptrSession ->
+                    musigGetPublicNonce
+                      ctx
+                      ptrSession
+                      ptrData
+                      ptrNonce
+                      ptrPtr
+                      (fromInteger len)
+                      nullPtr
+      return $
+        if isSuccess ret
+          then Just (PublicNonce fkNonce)
+          else Nothing
+
+-- returns false if nonce not consistent with the one received in get_public_nonce
+wMusigSetNonce :: WSignerData n -> PublicNonce -> Int -> IO Bool
+wMusigSetNonce (WSignerData fkData) (PublicNonce nonce32) idx =
+    withForeignPtr fctx $ \ctx ->
+        withForeignPtr fkData $ \ptrData ->
+            withForeignPtr nonce32 $ \ptrNonce -> do
+                ret <- musigSetNonce ctx (advancePtr ptrData idx) ptrNonce
+                return $ isSuccess ret
+
+wMusigCombineNonces :: KnownNat n => WMusigSession n -> WSignerData n -> Maybe XOnlyPubKey -> SNat n -> Maybe (WMusigRound2 n, CInt)
+wMusigCombineNonces (WMusigSession fkSess) (WSignerData fkData) maybeAdaptor numberOfSigners =
+  withContext $ \ctx -> alloca $ \ptrIsNegated -> do
+    -- with linear types we wouldn't need this copy
+    sessCopy <- withForeignPtr fkSess peek
+    fkNewSess <- mallocForeignPtr
+    ret <-
+      withForeignPtr fkData $ \ptrData ->
+        withForeignPtr fkNewSess $ \ptrSess -> do
+          poke ptrSess sessCopy
+          let partialApp :: Ptr PubKey64 -> IO Ret =\
+            musigCombineNonces ctx ptrSess ptrData (singToSize numberOfSigners) ptrIsNegated
+          case maybeAdaptor of
+            Nothing ->
+              partialApp nullPtr
+            Just (XOnlyPubKey fkAdaptor) ->
+              withForeignPtr fkAdaptor partialApp
+    isNegated <- peek ptrIsNegated
+    return $
+      if isSuccess ret
+        then Just (WMusigRound2 fkNewSess, isNegated)
+        else Nothing
+
+wMusigPartialSign :: WMusigRound2 n -> WPartialSignature
+wMusigPartialSign (WMusigRound2 fkSess) =
+  withContext $ \ctx -> do
+    fkPartialSig <- mallocForeignPtr
+    ret <-
+      withForeignPtr fkPartialSig $ \ptrPartialSig ->
+        withForeignPtr fkSess $ \ptrSess ->
+          musigPartialSign ctx ptrSess ptrPartialSig
+    unless (isSuccess ret) $ error "could not sign to make partial signature"
+    return $ WPartialSignature fkPartialSig
+
+wMusigPartialSignatureAdapt :: WPartialSignature -> WPartialSignature -> SecKey -> CInt -> Maybe WPartialSignature
+wMusigPartialSignatureAdapt (WPartialSignature fkToAdapt) (WPartialSignature fkAdaptor)
+                            (SecKey fkSecKey) isNegated =
+  withContext $ \ctx -> do
+    adapted <- mallocForeignPtr
+    peeked <- withForeignPtr fkToAdapt peek
+    ret <-
+      withForeignPtr adapted $ \adaptedPtr ->
+        withForeignPtr fkSecKey $ \ptrSecKey ->
+          withForeignPtr fkAdaptor $ \adaptorPtr -> do
+            poke adaptedPtr peeked
+            musigSignatureAdapt ctx adaptedPtr adaptorPtr ptrSecKey isNegated
+    return $
+      if isSuccess ret
+        then Just (WPartialSignature adapted)
+        else Nothing
+
+wMusigExtractSecKey :: SchnorrSig -> [WPartialSignature] -> CInt -> Maybe SecKey
+wMusigExtractSecKey (SchnorrSig fkSig) partialSigs isNegated = withContext $ \ctx -> do
+  fkSecKey <- mallocForeignPtr
+  ret <-
+    withForeignPtr fkSecKey $ \ptrSec ->
+      withForeignPtr fkSig $ \ptrSig ->
+        withPartialSigs partialSigs $ \len -> \ptrPartialSig ->
+          musigExtractSecretAdaptor ctx ptrSec ptrSig ptrPartialSig len isNegated
+  return $
+    if isSuccess ret
+      then Just (SecKey fkSecKey)
+      else Nothing
+
+nonceCommitment :: ByteString -> Maybe NonceCommitment
+nonceCommitment bs
+    | BS.length bs == 32 = unsafePerformIO $ do
+        fp <- mallocForeignPtr
+        withForeignPtr fp $ flip poke (NonceCommitment32 (toShort bs))
+        return $ Just $ NonceCommitment fp
+    | otherwise = Nothing
+
+sessionId :: ByteString -> Maybe SessionId
+sessionId bs
+    | BS.length bs == 32 = unsafePerformIO $ do
+        fp <- mallocForeignPtr
+        withForeignPtr fp $ flip poke (SessionId32 (toShort bs))
+        return $ Just $ SessionId fp
+    | otherwise = Nothing
+
+tweakNegate :: Tweak -> Maybe Tweak
+tweakNegate (Tweak fk) = withContext $ \ctx -> do
+    fnew <- mallocForeignPtr
+    peeked <- withForeignPtr fk peek
+    ret <- withForeignPtr fnew $ \n -> do
+        poke n peeked
+        ecTweakNegate ctx n
+    return $
+        if isSuccess ret
+            then Just (Tweak fnew)
+            else Nothing
 
 #ifdef ECDH
 -- | Compute Diffie-Hellman secret.
